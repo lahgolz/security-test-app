@@ -1,20 +1,25 @@
-import 'dotenv/config';
-import express from 'express';
-import session from 'express-session';
-import path from 'path';
-import Database from 'better-sqlite3';
-import { fileURLToPath } from 'url';
+import "dotenv/config";
+import express from "express";
+import session from "express-session";
+import path from "path";
+import Database from "better-sqlite3";
+import { fileURLToPath } from "url";
+import bcrypt from "bcrypt";
+import crypto from "crypto";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
-const db = new Database(':memory:');
+const SESSION_SECRET =
+  process.env.SESSION_SECRET || crypto.randomBytes(64).toString("hex");
 
-function initDatabase() {
-  console.log('Initializing database...');
+const db = new Database(":memory:");
+
+async function initDatabase() {
+  console.log("Initializing database...");
 
   db.exec(`CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -23,124 +28,167 @@ function initDatabase() {
     role TEXT NOT NULL
   )`);
 
-  const insertUser = db.prepare(`INSERT OR IGNORE INTO users (username, password, role) VALUES (?, ?, ?)`);
-  insertUser.run('user1', 'password1', 'user');
-  insertUser.run(process.env.ADMIN_USERNAME, process.env.ADMIN_PASSWORD, 'admin');
+  const user1Password = await bcrypt.hash("password1", 12);
+  const adminPassword = await bcrypt.hash(
+    process.env.ADMIN_PASSWORD || "admin",
+    12
+  );
 
-  console.log('Database initialized successfully!');
+  const insertUser = db.prepare(
+    `INSERT OR IGNORE INTO users (username, password, role) VALUES (?, ?, ?)`
+  );
+  insertUser.run("user1", user1Password, "user");
+  insertUser.run(process.env.ADMIN_USERNAME || "admin", adminPassword, "admin");
+
+  console.log("Database initialized successfully!");
 }
 
-initDatabase();
+await initDatabase();
 
 app.use(express.urlencoded({ extended: true }));
-app.use(express.static('public'));
+app.use(express.static("public"));
 
-app.use(session({
-  secret: 'weak-secret',
-  resave: true,
-  saveUninitialized: true,
-  cookie: {
-    secure: false,
-    httpOnly: false,
-    maxAge: 365 * 24 * 60 * 60 * 1000,
-    sameSite: false
+app.use(
+  session({
+    secret: SESSION_SECRET,
+    resave: false,
+    saveUninitialized: false,
+    name: "sessionId", // Don't use default session name
+    cookie: {
+      secure: process.env.NODE_ENV === "production", // Secure in production
+      httpOnly: true, // Prevent XSS access to cookies
+      maxAge: 30 * 60 * 1000, // 30 minutes instead of 1 year
+      sameSite: "strict", // CSRF protection
+    },
+  })
+);
+
+app.get("/debug", (req, res) => {
+  if (process.env.NODE_ENV !== "development") {
+    return res.sendStatus(404);
   }
-}));
 
-app.get('/debug', (req, res) => {
   res.json({
     environment: process.env,
     session: req.session,
     headers: req.headers,
-    userAgent: req.get('User-Agent')
+    userAgent: req.get("User-Agent"),
   });
 });
 
-app.get('/', (req, res) => {
+app.get("/", (req, res) => {
   if (req.session.user) {
-    return req.session.user.role === 'admin' 
-      ? res.redirect('/admin') 
-      : res.redirect('/user');
+    return req.session.user.role === "admin"
+      ? res.redirect("/admin")
+      : res.redirect("/user");
   }
 
-  res.redirect('/login');
+  res.redirect("/login");
 });
 
-app.get('/login', (req, res) => {
-  res.sendFile(path.join(__dirname, 'views', 'login.html'));
+app.get("/login", (req, res) => {
+  res.sendFile(path.join(__dirname, "views", "login.html"));
 });
 
-app.post('/login', (req, res) => {
+app.post("/login", async (req, res) => {
   const { username, password } = req.body;
-  
+
   try {
-    const user = db.prepare('SELECT * FROM users WHERE username = ? AND password = ?')
-      .get(username, password);
-    
-    if (user) {
-      req.session.user = { username: user.username, role: user.role };
+    const user = db
+      .prepare("SELECT * FROM users WHERE username = ?")
+      .get(username);
 
-      return user.role === 'admin' 
-        ? res.redirect('/admin') 
-        : res.redirect('/user');
-    }
-    
-    res.redirect('/login?error=1');
-  } catch (err) {
-    console.error(err);
-    res.redirect('/login?error=1');
-  }
-});
-
-app.get('/user', (req, res) => {
-  if (!req.session.user || req.session.user.role !== 'user') {
-    return res.redirect('/login');
-  }
-
-  res.sendFile(path.join(__dirname, 'views', 'user.html'));
-});
-
-app.get('/admin', (req, res) => {
-  if (!req.session.user || req.session.user.role !== 'admin') {
-    return res.redirect('/login');
-  }
-
-  res.sendFile(path.join(__dirname, 'views', 'admin.html'));
-});
-
-app.get('/logout', (req, res) => {
-  req.session.destroy();
-  res.redirect('/login');
-});
-
-app.get('/reset-password', (req, res) => {
-  res.sendFile(path.join(__dirname, 'views', 'reset-password.html'));
-});
-
-app.post('/reset-password', (req, res) => {
-  const { username, password } = req.body;
-  
-  try {
-    const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
-    
     if (!user) {
-      return res.redirect('/reset-password?error=user_not_found');
+      return res.redirect("/login?error=1");
     }
-    
-    const conflictUser = db.prepare('SELECT username FROM users WHERE password = ? AND username != ?')
-      .get(password, username);
-    
-    if (conflictUser) {
-      return res.redirect(`/reset-password?error=password_in_use&conflict_user=${encodeURIComponent(conflictUser.username)}`);
+
+    const isValidPassword = await bcrypt.compare(password, user.password);
+
+    if (!isValidPassword) {
+      return res.redirect("/login?error=1");
     }
-    
-    db.prepare('UPDATE users SET password = ? WHERE username = ?')
-      .run(password, username);
-    
-    res.redirect('/reset-password?success=1');
+
+    req.session.regenerate((err) => {
+      if (err) {
+        console.error("Session regeneration error:", err);
+        return res.redirect("/login?error=1");
+      }
+
+      req.session.user = {
+        id: user.id,
+        username: user.username,
+        role: user.role,
+      };
+
+      req.session.save((err) => {
+        if (err) {
+          console.error("Session save error:", err);
+          return res.redirect("/login?error=1");
+        }
+
+        return user.role === "admin"
+          ? res.redirect("/admin")
+          : res.redirect("/user");
+      });
+    });
   } catch (err) {
-    console.error('Reset password error:', err);
-    res.redirect('/reset-password?error=1');
+    console.error("Login error:", err);
+    res.redirect("/login?error=1");
+  }
+});
+
+app.get("/user", (req, res) => {
+  if (!req.session.user || req.session.user.role !== "user") {
+    return res.redirect("/login");
+  }
+
+  res.sendFile(path.join(__dirname, "views", "user.html"));
+});
+
+app.get("/admin", (req, res) => {
+  if (!req.session.user || req.session.user.role !== "admin") {
+    return res.redirect("/login");
+  }
+
+  res.sendFile(path.join(__dirname, "views", "admin.html"));
+});
+
+app.get("/logout", (req, res) => {
+  req.session.destroy((err) => {
+    if (err) {
+      console.error("Session destruction error:", err);
+    }
+    res.clearCookie("sessionId");
+    res.redirect("/login");
+  });
+});
+
+app.get("/reset-password", (req, res) => {
+  res.sendFile(path.join(__dirname, "views", "reset-password.html"));
+});
+
+app.post("/reset-password", async (req, res) => {
+  const { username, password } = req.body;
+
+  try {
+    const user = db
+      .prepare("SELECT * FROM users WHERE username = ?")
+      .get(username);
+    if (!user) {
+      return res.redirect("/reset-password?error=1");
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 12);
+
+    db.prepare("UPDATE users SET password = ? WHERE username = ?").run(
+      hashedPassword,
+      username
+    );
+
+    res.redirect("/reset-password?success=1");
+  } catch (err) {
+    console.error("Reset password error:", err);
+    res.redirect("/reset-password?error=1");
   }
 });
 
