@@ -1,6 +1,6 @@
 # Application d'Authentification Simple
 
-Une application web Node.js/Express montrant des exemples de vulnérabilités Security Misconfiguration et Insecure Design
+Une application web Node.js/Express montrant des exemples de vulnérabilités Security Misconfiguration et Insecure Design.
 
 ## 📋 Description
 
@@ -20,10 +20,6 @@ La version vulnérable est présente sur la branche `main` et la version corrig�
 1. Clonez le projet et naviguez dans le dossier
 2. Installez les dépendances :
    ```bash
-   pnpm install
-   ```
-   ou
-   ```bash
    npm install
    ```
 
@@ -40,10 +36,6 @@ La version vulnérable est présente sur la branche `main` et la version corrig�
 ## 🔧 Utilisation
 
 Démarrez l'application :
-```bash
-pnpm start
-```
-ou
 ```bash
 npm start
 ```
